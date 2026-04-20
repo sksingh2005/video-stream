@@ -1,0 +1,9 @@
+name = "secure-hls-worker"
+main = "src/index.ts"
+compatibility_date = "2026-04-20"
+account_id = "fab4727a908653d4e333e290c9a044ae"
+
+[[r2_buckets]]
+binding = "HLS_BUCKET"
+bucket_name = "edtech"
+remote = true

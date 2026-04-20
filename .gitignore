@@ -1,0 +1,5 @@
+.env
+.gocache
+.gomodcache
+examples/cloudflare-worker/.dev.vars
+.env.example

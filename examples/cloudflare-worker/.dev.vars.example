@@ -1,0 +1,2 @@
+PLAYBACK_TOKEN_SECRET=change-me
+PLAYBACK_ALLOWED_ORIGIN=http://localhost:3000
