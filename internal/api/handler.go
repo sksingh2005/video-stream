@@ -17,14 +17,16 @@ import (
 
 type Handler struct {
 	service *video.Service
+	jobs    *video.JobManager
 }
 
-func NewHandler(service *video.Service) http.Handler {
-	h := &Handler{service: service}
+func NewHandler(service *video.Service, jobs *video.JobManager) http.Handler {
+	h := &Handler{service: service, jobs: jobs}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", h.handleHealth)
 	mux.HandleFunc("/api/v1/videos/process", h.handleProcessVideo)
 	mux.HandleFunc("/api/v1/videos/upload", h.handleUploadVideo)
+	mux.HandleFunc("/api/v1/video-jobs/", h.handleVideoJob)
 	return withJSON(mux)
 }
 
@@ -95,14 +97,15 @@ func (h *Handler) handleUploadVideo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sourcePath := sourceFile.Name()
-	defer os.Remove(sourcePath)
 
 	if _, err := io.Copy(sourceFile, file); err != nil {
 		sourceFile.Close()
+		_ = os.Remove(sourcePath)
 		writeError(w, http.StatusInternalServerError, "store_upload_failed", err)
 		return
 	}
 	if err := sourceFile.Close(); err != nil {
+		_ = os.Remove(sourcePath)
 		writeError(w, http.StatusInternalServerError, "store_upload_failed", err)
 		return
 	}
@@ -117,22 +120,54 @@ func (h *Handler) handleUploadVideo(w http.ResponseWriter, r *http.Request) {
 		thumbnailTimeSeconds = parsed
 	}
 
-	resp, err := h.service.ProcessAndUpload(r.Context(), video.ProcessRequest{
+	job, err := h.jobs.Enqueue(video.ProcessRequest{
 		VideoID:              videoID,
 		SourcePath:           sourcePath,
 		ThumbnailTimeSeconds: thumbnailTimeSeconds,
 		CleanupSource:        true,
-	})
+	}, true)
 	if err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, video.ErrInvalidRequest) {
-			status = http.StatusBadRequest
+		_ = os.Remove(sourcePath)
+		switch {
+		case errors.Is(err, video.ErrInvalidRequest):
+			writeError(w, http.StatusBadRequest, "invalid_video_job", err)
+		case errors.Is(err, video.ErrVideoAlreadyProcessing):
+			writeError(w, http.StatusConflict, "video_job_already_active", err)
+		case errors.Is(err, video.ErrJobQueueFull):
+			writeError(w, http.StatusServiceUnavailable, "video_job_queue_full", err)
+		default:
+			writeError(w, http.StatusInternalServerError, "video_job_enqueue_failed", err)
 		}
-		writeError(w, status, "video_processing_failed", err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"job": job,
+	})
+}
+
+func (h *Handler) handleVideoJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	jobID := strings.TrimPrefix(r.URL.Path, "/api/v1/video-jobs/")
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" || strings.Contains(jobID, "/") {
+		writeError(w, http.StatusNotFound, "job_not_found", fmt.Errorf("video job not found"))
+		return
+	}
+
+	job, ok := h.jobs.Get(jobID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "job_not_found", fmt.Errorf("video job not found"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"job": job,
+	})
 }
 
 func withJSON(next http.Handler) http.Handler {

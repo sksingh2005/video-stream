@@ -11,6 +11,7 @@ import (
 
 type Config struct {
 	Server   ServerConfig
+	Jobs     JobConfig
 	R2       R2Config
 	Video    VideoConfig
 	Upload   UploadConfig
@@ -19,6 +20,12 @@ type Config struct {
 
 type ServerConfig struct {
 	Address string
+}
+
+type JobConfig struct {
+	WorkerCount      int
+	QueueSize        int
+	RetentionMinutes int
 }
 
 type R2Config struct {
@@ -66,6 +73,11 @@ func Load() (Config, error) {
 	cfg := Config{
 		Server: ServerConfig{
 			Address: getEnv("VIDEO_SERVICE_ADDR", ":8080"),
+		},
+		Jobs: JobConfig{
+			WorkerCount:      getEnvInt("VIDEO_JOB_WORKER_COUNT", 1),
+			QueueSize:        getEnvInt("VIDEO_JOB_QUEUE_SIZE", 16),
+			RetentionMinutes: getEnvInt("VIDEO_JOB_RETENTION_MINUTES", 120),
 		},
 		R2: R2Config{
 			AccountID:       os.Getenv("R2_ACCOUNT_ID"),
@@ -118,6 +130,15 @@ func (c Config) validate() error {
 	}
 	if c.Video.SegmentLength <= 0 {
 		return errors.New("HLS_SEGMENT_LENGTH must be positive")
+	}
+	if c.Jobs.WorkerCount <= 0 {
+		return errors.New("VIDEO_JOB_WORKER_COUNT must be positive")
+	}
+	if c.Jobs.QueueSize <= 0 {
+		return errors.New("VIDEO_JOB_QUEUE_SIZE must be positive")
+	}
+	if c.Jobs.RetentionMinutes <= 0 {
+		return errors.New("VIDEO_JOB_RETENTION_MINUTES must be positive")
 	}
 	if c.Security.TokenTTLSeconds <= 0 {
 		return errors.New("PLAYBACK_TOKEN_TTL_SECONDS must be positive")
