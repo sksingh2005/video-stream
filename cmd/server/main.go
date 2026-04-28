@@ -27,9 +27,13 @@ func main() {
 	}
 
 	service := video.NewService(cfg, r2Client)
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
+	jobs := video.NewJobManager(cfg.Jobs, service)
+	jobs.Start(workerCtx, cfg.Jobs.WorkerCount)
 	server := &http.Server{
 		Addr:              cfg.Server.Address,
-		Handler:           api.NewHandler(service),
+		Handler:           api.NewHandler(service, jobs),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -43,6 +47,7 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
+	workerCancel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
