@@ -50,12 +50,52 @@ The service never returns public R2 links. It uploads the full HLS tree to your 
 
 If `cleanupSource` is `true`, the original local source file is deleted only after every generated HLS asset has been uploaded and verified in R2 with a matching object size.
 
-You can also upload a video file directly to the processor:
+You can also upload a video file directly to the processor. This endpoint now queues background processing and returns immediately:
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/videos/upload \
   -F "videoId=lesson-123" \
   -F "file=@/absolute/path/to/source.mp4"
+```
+
+Accepted response:
+
+```json
+{
+  "job": {
+    "jobId": "9f8c0a0d5f4e7b7f1f9d7e90",
+    "status": "queued",
+    "videoId": "lesson-123",
+    "createdAt": "2026-04-29T10:15:00Z"
+  }
+}
+```
+
+Then poll the job status:
+
+```bash
+curl http://localhost:8080/api/v1/video-jobs/9f8c0a0d5f4e7b7f1f9d7e90
+```
+
+Successful job status:
+
+```json
+{
+  "job": {
+    "jobId": "9f8c0a0d5f4e7b7f1f9d7e90",
+    "status": "succeeded",
+    "videoId": "lesson-123",
+    "createdAt": "2026-04-29T10:15:00Z",
+    "startedAt": "2026-04-29T10:15:01Z",
+    "completedAt": "2026-04-29T10:18:44Z",
+    "result": {
+      "videoId": "lesson-123",
+      "videoPath": "videos/lesson-123/master.m3u8",
+      "thumbnailPath": "videos/lesson-123/thumb.jpg",
+      "duration": 812
+    }
+  }
+}
 ```
 
 The LMS admin video upload now uses this multipart endpoint through Next.js, so the browser no longer sends video files directly to R2 and does not need R2 CORS for video uploads.
@@ -74,7 +114,16 @@ Set this in the LMS environment so Next.js can call the Go processor:
 VIDEO_PROCESSOR_API_URL=http://localhost:8080
 ```
 
-Then the LMS admin route can call the processor and store the returned HLS path:
+Then the LMS admin route should:
+
+1. `POST` the file to `/api/v1/videos/upload`
+2. Store the returned `jobId`
+3. Poll `/api/v1/video-jobs/:jobId`
+4. Persist the HLS paths only after `status === "succeeded"`
+
+If your LMS prefers to upload the file itself and send a server path later, `/api/v1/videos/process` remains available for synchronous server-side processing.
+
+Example of the final result payload the LMS should store after the job succeeds:
 
 ```json
 {
