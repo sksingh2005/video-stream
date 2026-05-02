@@ -91,9 +91,9 @@ func (h *Handler) handleUploadVideo(w http.ResponseWriter, r *http.Request) {
 		extension = ".mp4"
 	}
 
-	sourceFile, err := os.CreateTemp("", "video-upload-*"+extension)
+	sourceFile, err := h.service.CreateSourceUploadFile(extension)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create_temp_file_failed", err)
+		writeError(w, http.StatusInternalServerError, "create_source_file_failed", err)
 		return
 	}
 	sourcePath := sourceFile.Name()

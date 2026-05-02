@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +27,7 @@ type JobConfig struct {
 	WorkerCount      int
 	QueueSize        int
 	RetentionMinutes int
+	StateDir         string
 }
 
 type R2Config struct {
@@ -55,7 +57,8 @@ type VariantProfile struct {
 }
 
 type UploadConfig struct {
-	Prefix string
+	Prefix    string
+	SourceDir string
 }
 
 type SecurityConfig struct {
@@ -78,6 +81,7 @@ func Load() (Config, error) {
 			WorkerCount:      getEnvInt("VIDEO_JOB_WORKER_COUNT", 1),
 			QueueSize:        getEnvInt("VIDEO_JOB_QUEUE_SIZE", 16),
 			RetentionMinutes: getEnvInt("VIDEO_JOB_RETENTION_MINUTES", 120),
+			StateDir:         getEnv("VIDEO_JOB_STATE_DIR", filepath.Join(os.TempDir(), "video-job-state")),
 		},
 		R2: R2Config{
 			AccountID:       os.Getenv("R2_ACCOUNT_ID"),
@@ -94,7 +98,8 @@ func Load() (Config, error) {
 			VariantBitrates: defaultVariants(),
 		},
 		Upload: UploadConfig{
-			Prefix: strings.Trim(getEnv("VIDEO_UPLOAD_PREFIX", "videos"), "/"),
+			Prefix:    strings.Trim(getEnv("VIDEO_UPLOAD_PREFIX", "videos"), "/"),
+			SourceDir: getEnv("VIDEO_SOURCE_UPLOAD_DIR", filepath.Join(os.TempDir(), "video-source-uploads")),
 		},
 		Security: SecurityConfig{
 			PlaybackDomain:    getEnv("PLAYBACK_DOMAIN", "https://stream.example.com"),
@@ -140,8 +145,14 @@ func (c Config) validate() error {
 	if c.Jobs.RetentionMinutes <= 0 {
 		return errors.New("VIDEO_JOB_RETENTION_MINUTES must be positive")
 	}
+	if strings.TrimSpace(c.Jobs.StateDir) == "" {
+		return errors.New("VIDEO_JOB_STATE_DIR must not be empty")
+	}
 	if c.Security.TokenTTLSeconds <= 0 {
 		return errors.New("PLAYBACK_TOKEN_TTL_SECONDS must be positive")
+	}
+	if strings.TrimSpace(c.Upload.SourceDir) == "" {
+		return errors.New("VIDEO_SOURCE_UPLOAD_DIR must not be empty")
 	}
 	return nil
 }

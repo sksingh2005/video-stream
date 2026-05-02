@@ -27,6 +27,9 @@ func main() {
 	}
 
 	service := video.NewService(cfg, r2Client)
+	if err := service.CleanupInterruptedUploads(context.Background()); err != nil {
+		log.Fatalf("cleanup interrupted uploads: %v", err)
+	}
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()
 	jobs := video.NewJobManager(cfg.Jobs, service)
