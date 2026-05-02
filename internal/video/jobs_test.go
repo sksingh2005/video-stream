@@ -49,7 +49,7 @@ func TestJobManagerProcessesQueuedJob(t *testing.T) {
 		uploaded: []storage.UploadedObject{{ObjectKey: "videos/lesson-123/master.m3u8", Size: 8}},
 	})
 
-	manager := NewJobManager(config.JobConfig{QueueSize: 2, RetentionMinutes: 60}, service)
+	manager := NewJobManager(config.JobConfig{QueueSize: 2, RetentionMinutes: 60, StateDir: filepath.Join(t.TempDir(), "jobs")}, service)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	manager.Start(ctx, 1)
@@ -82,7 +82,7 @@ func TestJobManagerProcessesQueuedJob(t *testing.T) {
 }
 
 func TestJobManagerReturnsQueueFull(t *testing.T) {
-	manager := NewJobManager(config.JobConfig{QueueSize: 1, RetentionMinutes: 60}, nil)
+	manager := NewJobManager(config.JobConfig{QueueSize: 1, RetentionMinutes: 60, StateDir: filepath.Join(t.TempDir(), "jobs")}, nil)
 
 	_, err := manager.Enqueue(ProcessRequest{VideoID: "one", SourcePath: "C:\\temp\\one.mp4"}, false)
 	if err != nil {
@@ -99,7 +99,7 @@ func TestJobManagerReturnsQueueFull(t *testing.T) {
 }
 
 func TestJobManagerRejectsDuplicateActiveVideoID(t *testing.T) {
-	manager := NewJobManager(config.JobConfig{QueueSize: 2, RetentionMinutes: 60}, nil)
+	manager := NewJobManager(config.JobConfig{QueueSize: 2, RetentionMinutes: 60, StateDir: filepath.Join(t.TempDir(), "jobs")}, nil)
 
 	_, err := manager.Enqueue(ProcessRequest{VideoID: "lesson-123", SourcePath: "C:\\temp\\one.mp4"}, false)
 	if err != nil {
@@ -145,7 +145,7 @@ func TestJobManagerAllowsRetryAfterFailure(t *testing.T) {
 		},
 	}, &fakeR2Storage{})
 
-	manager := NewJobManager(config.JobConfig{QueueSize: 2, RetentionMinutes: 60}, service)
+	manager := NewJobManager(config.JobConfig{QueueSize: 2, RetentionMinutes: 60, StateDir: filepath.Join(t.TempDir(), "jobs")}, service)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	manager.Start(ctx, 1)
@@ -175,4 +175,72 @@ func TestJobManagerAllowsRetryAfterFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected retry enqueue to succeed, got %v", err)
 	}
+}
+
+func TestJobManagerRecoversQueuedJobAfterRestart(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "jobs")
+	sourcePath := filepath.Join(t.TempDir(), "lesson.mp4")
+	if err := os.WriteFile(sourcePath, []byte("video"), 0o644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	outputDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outputDir, "master.m3u8"), []byte("#EXTM3U"), 0o644); err != nil {
+		t.Fatalf("write master manifest: %v", err)
+	}
+
+	originalProbe := probeSource
+	originalTranscode := transcodeHLS
+	t.Cleanup(func() {
+		probeSource = originalProbe
+		transcodeHLS = originalTranscode
+	})
+	probeSource = func(context.Context, string, string) (ProbeResult, error) {
+		return ProbeResult{Width: 1280, Height: 720, DurationSeconds: 10.5}, nil
+	}
+	transcodeHLS = func(context.Context, TranscodeRequest) (TranscodeResult, error) {
+		return TranscodeResult{OutputDir: outputDir}, nil
+	}
+
+	service := NewService(config.Config{
+		Upload: config.UploadConfig{Prefix: "videos"},
+		Video: config.VideoConfig{
+			FFmpegBinary:    "ffmpeg",
+			FFprobeBinary:   "ffprobe",
+			WorkingDir:      t.TempDir(),
+			SegmentLength:   6,
+			VariantBitrates: []config.VariantProfile{{Name: "720p", Width: 1280, Height: 720, VideoRate: "2800k", MaxRate: "2996k", Buffer: "4200k", AudioRate: "128k"}},
+		},
+	}, &fakeR2Storage{
+		uploaded: []storage.UploadedObject{{ObjectKey: "videos/lesson-123/master.m3u8", Size: 8}},
+	})
+
+	manager := NewJobManager(config.JobConfig{QueueSize: 2, RetentionMinutes: 60, StateDir: stateDir}, service)
+	job, err := manager.Enqueue(ProcessRequest{
+		VideoID:       "lesson-123",
+		SourcePath:    sourcePath,
+		CleanupSource: true,
+	}, true)
+	if err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+
+	restarted := NewJobManager(config.JobConfig{QueueSize: 2, RetentionMinutes: 60, StateDir: stateDir}, service)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	restarted.Start(ctx, 1)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		current, ok := restarted.Get(job.ID)
+		if !ok {
+			t.Fatalf("expected recovered job %s to exist", job.ID)
+		}
+		if current.Status == JobStatusSucceeded {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Fatalf("recovered job %s did not finish in time", job.ID)
 }
