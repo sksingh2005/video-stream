@@ -19,6 +19,7 @@ type TranscodeRequest struct {
 	SegmentLength   int
 	ThumbnailAt     int
 	VariantProfiles []config.VariantProfile
+	Progress        func(TranscodeProgress)
 }
 
 type TranscodeResult struct {
@@ -30,6 +31,13 @@ type TranscodeResult struct {
 type RenderedVariant struct {
 	Profile          config.VariantProfile
 	RelativePlaylist string
+}
+
+type TranscodeProgress struct {
+	CurrentVariant int
+	TotalVariants  int
+	VariantName    string
+	Stage          string
 }
 
 func SelectVariants(sourceWidth, sourceHeight int, variants []config.VariantProfile) []config.VariantProfile {
@@ -60,6 +68,15 @@ func TranscodeHLS(ctx context.Context, req TranscodeRequest) (TranscodeResult, e
 	}
 
 	for _, variant := range req.VariantProfiles {
+		if req.Progress != nil {
+			req.Progress(TranscodeProgress{
+				CurrentVariant: len(result.Variants) + 1,
+				TotalVariants:  len(req.VariantProfiles),
+				VariantName:    variant.Name,
+				Stage:          "start_variant",
+			})
+		}
+
 		variantDir := filepath.Join(outputDir, variant.Name)
 		if err := os.MkdirAll(variantDir, 0o755); err != nil {
 			return TranscodeResult{}, fmt.Errorf("create variant dir: %w", err)
@@ -101,6 +118,14 @@ func TranscodeHLS(ctx context.Context, req TranscodeRequest) (TranscodeResult, e
 			Profile:          variant,
 			RelativePlaylist: filepath.ToSlash(filepath.Join(variant.Name, "index.m3u8")),
 		})
+		if req.Progress != nil {
+			req.Progress(TranscodeProgress{
+				CurrentVariant: len(result.Variants),
+				TotalVariants:  len(req.VariantProfiles),
+				VariantName:    variant.Name,
+				Stage:          "complete_variant",
+			})
+		}
 	}
 
 	if err := writeMasterPlaylist(outputDir, result.Variants); err != nil {
