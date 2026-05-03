@@ -25,6 +25,7 @@ func NewHandler(service *video.Service, jobs *video.JobManager) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", h.handleHealth)
 	mux.HandleFunc("/api/v1/videos/process", h.handleProcessVideo)
+	mux.HandleFunc("/api/v1/videos/enqueue", h.handleEnqueueVideo)
 	mux.HandleFunc("/api/v1/videos/upload", h.handleUploadVideo)
 	mux.HandleFunc("/api/v1/video-jobs/", h.handleVideoJob)
 	return withJSON(mux)
@@ -128,6 +129,38 @@ func (h *Handler) handleUploadVideo(w http.ResponseWriter, r *http.Request) {
 	}, true)
 	if err != nil {
 		_ = os.Remove(sourcePath)
+		switch {
+		case errors.Is(err, video.ErrInvalidRequest):
+			writeError(w, http.StatusBadRequest, "invalid_video_job", err)
+		case errors.Is(err, video.ErrVideoAlreadyProcessing):
+			writeError(w, http.StatusConflict, "video_job_already_active", err)
+		case errors.Is(err, video.ErrJobQueueFull):
+			writeError(w, http.StatusServiceUnavailable, "video_job_queue_full", err)
+		default:
+			writeError(w, http.StatusInternalServerError, "video_job_enqueue_failed", err)
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"job": job,
+	})
+}
+
+func (h *Handler) handleEnqueueVideo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req video.ProcessRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err)
+		return
+	}
+
+	job, err := h.jobs.Enqueue(req, false)
+	if err != nil {
 		switch {
 		case errors.Is(err, video.ErrInvalidRequest):
 			writeError(w, http.StatusBadRequest, "invalid_video_job", err)

@@ -98,7 +98,19 @@ Successful job status:
 }
 ```
 
-The LMS admin video upload now uses this multipart endpoint through Next.js, so the browser no longer sends video files directly to R2 and does not need R2 CORS for video uploads.
+For large uploads, the recommended flow is to upload the raw source to R2 first and then enqueue processing from that stored source object:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/videos/enqueue \
+  -H "Content-Type: application/json" \
+  -d '{
+    "videoId": "lesson-123",
+    "sourceObjectKey": "video-sources/content-123/raw.mp4",
+    "cleanupSourceObject": true
+  }'
+```
+
+This avoids proxying a 300-400 MB source file through your LMS app and then through the Go processor again. After a successful publish, the processor deletes the temporary raw source object when `cleanupSourceObject` is `true`.
 
 ## Integration files
 
@@ -116,10 +128,12 @@ VIDEO_PROCESSOR_API_URL=http://localhost:8080
 
 Then the LMS admin route should:
 
-1. `POST` the file to `/api/v1/videos/upload`
-2. Store the returned `jobId`
-3. Poll `/api/v1/video-jobs/:jobId`
-4. Persist the HLS paths only after `status === "succeeded"`
+1. Create a presigned R2 upload URL for a temporary source object such as `video-sources/content-123/...`
+2. Upload the raw source file directly from the browser to R2
+3. `POST` the source object key to `/api/v1/videos/enqueue`
+4. Store the returned `jobId`
+5. Poll `/api/v1/video-jobs/:jobId`
+6. Persist the HLS paths only after `status === "succeeded"`
 
 If your LMS prefers to upload the file itself and send a server path later, `/api/v1/videos/process` remains available for synchronous server-side processing.
 

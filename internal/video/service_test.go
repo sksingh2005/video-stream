@@ -11,11 +11,12 @@ import (
 )
 
 type fakeR2Storage struct {
-	uploaded []storage.UploadedObject
-	err      error
-	deleted  []string
-	copied   []string
-	cleanup  []string
+	uploaded  []storage.UploadedObject
+	err       error
+	deleted   []string
+	copied    []string
+	cleanup   []string
+	downloads []string
 }
 
 func (f *fakeR2Storage) UploadDirVerified(_ context.Context, _ string, _ string) ([]storage.UploadedObject, error) {
@@ -35,6 +36,16 @@ func (f *fakeR2Storage) DeletePrefix(_ context.Context, prefix string) error {
 func (f *fakeR2Storage) DeletePrefixContentsExcept(_ context.Context, prefix, keepPrefix string) error {
 	f.cleanup = append(f.cleanup, prefix+"|"+keepPrefix)
 	return nil
+}
+
+func (f *fakeR2Storage) DeleteObject(_ context.Context, objectKey string) error {
+	f.deleted = append(f.deleted, objectKey)
+	return nil
+}
+
+func (f *fakeR2Storage) DownloadFile(_ context.Context, objectKey, destinationPath string) error {
+	f.downloads = append(f.downloads, objectKey)
+	return os.WriteFile(destinationPath, []byte("video"), 0o644)
 }
 
 func TestProcessAndUploadDeletesSourceOnlyAfterVerifiedUpload(t *testing.T) {
@@ -192,5 +203,57 @@ func TestCleanupInterruptedUploadsDeletesRecordedPrefixes(t *testing.T) {
 
 	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
 		t.Fatalf("expected manifest to be removed, got err=%v", err)
+	}
+}
+
+func TestProcessAndUploadDownloadsAndDeletesSourceObject(t *testing.T) {
+	outputDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outputDir, "master.m3u8"), []byte("#EXTM3U"), 0o644); err != nil {
+		t.Fatalf("write master manifest: %v", err)
+	}
+
+	originalProbe := probeSource
+	originalTranscode := transcodeHLS
+	t.Cleanup(func() {
+		probeSource = originalProbe
+		transcodeHLS = originalTranscode
+	})
+	probeSource = func(context.Context, string, string) (ProbeResult, error) {
+		return ProbeResult{Width: 1280, Height: 720, DurationSeconds: 12}, nil
+	}
+	transcodeHLS = func(_ context.Context, req TranscodeRequest) (TranscodeResult, error) {
+		if _, err := os.Stat(req.SourcePath); err != nil {
+			t.Fatalf("expected downloaded source path to exist: %v", err)
+		}
+		return TranscodeResult{OutputDir: outputDir}, nil
+	}
+
+	r2 := &fakeR2Storage{
+		uploaded: []storage.UploadedObject{{ObjectKey: "videos/lesson-123/master.m3u8", Size: 8}},
+	}
+	service := NewService(config.Config{
+		Upload: config.UploadConfig{Prefix: "videos", SourceDir: t.TempDir()},
+		Video: config.VideoConfig{
+			FFmpegBinary:    "ffmpeg",
+			FFprobeBinary:   "ffprobe",
+			WorkingDir:      t.TempDir(),
+			SegmentLength:   6,
+			VariantBitrates: []config.VariantProfile{{Name: "720p", Width: 1280, Height: 720, VideoRate: "2800k", MaxRate: "2996k", Buffer: "4200k", AudioRate: "128k"}},
+		},
+	}, r2)
+
+	if _, err := service.ProcessAndUpload(context.Background(), ProcessRequest{
+		VideoID:             "lesson-123",
+		SourceObjectKey:     "video-sources/content-123/raw.mp4",
+		CleanupSourceObject: true,
+	}); err != nil {
+		t.Fatalf("process and upload from source object: %v", err)
+	}
+
+	if len(r2.downloads) != 1 || r2.downloads[0] != "video-sources/content-123/raw.mp4" {
+		t.Fatalf("unexpected downloads: %#v", r2.downloads)
+	}
+	if len(r2.deleted) == 0 || r2.deleted[len(r2.deleted)-1] != "video-sources/content-123/raw.mp4" {
+		t.Fatalf("expected source object cleanup, got %#v", r2.deleted)
 	}
 }

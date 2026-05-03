@@ -28,13 +28,17 @@ type r2Storage interface {
 	CopyPrefixVerified(ctx context.Context, sourcePrefix, destinationPrefix string) ([]storage.UploadedObject, error)
 	DeletePrefix(ctx context.Context, prefix string) error
 	DeletePrefixContentsExcept(ctx context.Context, prefix, keepPrefix string) error
+	DeleteObject(ctx context.Context, objectKey string) error
+	DownloadFile(ctx context.Context, objectKey, destinationPath string) error
 }
 
 type ProcessRequest struct {
 	VideoID              string                `json:"videoId"`
 	SourcePath           string                `json:"sourcePath"`
+	SourceObjectKey      string                `json:"sourceObjectKey,omitempty"`
 	ThumbnailTimeSeconds int                   `json:"thumbnailTimeSeconds,omitempty"`
 	CleanupSource        bool                  `json:"cleanupSource,omitempty"`
+	CleanupSourceObject  bool                  `json:"cleanupSourceObject,omitempty"`
 	ProgressCallback     func(ProcessProgress) `json:"-"`
 }
 
@@ -143,13 +147,19 @@ func (s *Service) CleanupInterruptedUploads(ctx context.Context) error {
 }
 
 func (s *Service) ProcessAndUpload(ctx context.Context, req ProcessRequest) (ProcessResponse, error) {
-	if strings.TrimSpace(req.VideoID) == "" || strings.TrimSpace(req.SourcePath) == "" {
-		return ProcessResponse{}, fmt.Errorf("%w: videoId and sourcePath are required", ErrInvalidRequest)
+	if strings.TrimSpace(req.VideoID) == "" {
+		return ProcessResponse{}, fmt.Errorf("%w: videoId is required", ErrInvalidRequest)
 	}
 
-	if _, err := os.Stat(req.SourcePath); err != nil {
-		return ProcessResponse{}, fmt.Errorf("%w: sourcePath is not readable: %v", ErrInvalidRequest, err)
+	sourcePath, cleanupLocalSource, err := s.resolveSourcePath(ctx, req)
+	if err != nil {
+		return ProcessResponse{}, err
 	}
+	defer func() {
+		if cleanupLocalSource {
+			_ = os.Remove(sourcePath)
+		}
+	}()
 
 	videoID, err := sanitizeVideoID(req.VideoID)
 	if err != nil {
@@ -167,7 +177,7 @@ func (s *Service) ProcessAndUpload(ctx context.Context, req ProcessRequest) (Pro
 		Percent: 10,
 		Message: "Inspecting source video",
 	})
-	sourceMeta, err := probeSource(ctx, s.cfg.Video.FFprobeBinary, req.SourcePath)
+	sourceMeta, err := probeSource(ctx, s.cfg.Video.FFprobeBinary, sourcePath)
 	if err != nil {
 		return ProcessResponse{}, fmt.Errorf("probe source video: %w", err)
 	}
@@ -179,7 +189,7 @@ func (s *Service) ProcessAndUpload(ctx context.Context, req ProcessRequest) (Pro
 
 	rendered, err := transcodeHLS(ctx, TranscodeRequest{
 		FFmpegBinary:    s.cfg.Video.FFmpegBinary,
-		SourcePath:      req.SourcePath,
+		SourcePath:      sourcePath,
 		WorkDir:         workDir,
 		SegmentLength:   s.cfg.Video.SegmentLength,
 		ThumbnailAt:     s.thumbnailOffset(req.ThumbnailTimeSeconds),
@@ -272,8 +282,15 @@ func (s *Service) ProcessAndUpload(ctx context.Context, req ProcessRequest) (Pro
 			Percent: 97,
 			Message: "Cleaning source upload",
 		})
-		if err := os.Remove(req.SourcePath); err != nil {
+		if err := os.Remove(sourcePath); err != nil {
 			return ProcessResponse{}, fmt.Errorf("cleanup source video after verified upload: %w", err)
+		}
+		cleanupLocalSource = false
+	}
+
+	if req.CleanupSourceObject && strings.TrimSpace(req.SourceObjectKey) != "" {
+		if err := s.r2.DeleteObject(ctx, req.SourceObjectKey); err != nil {
+			return ProcessResponse{}, fmt.Errorf("cleanup source object after verified upload: %w", err)
 		}
 	}
 
@@ -284,6 +301,44 @@ func (s *Service) ProcessAndUpload(ctx context.Context, req ProcessRequest) (Pro
 	})
 
 	return resp, nil
+}
+
+func (s *Service) resolveSourcePath(ctx context.Context, req ProcessRequest) (string, bool, error) {
+	sourcePath := strings.TrimSpace(req.SourcePath)
+	if sourcePath != "" {
+		if _, err := os.Stat(sourcePath); err != nil {
+			return "", false, fmt.Errorf("%w: sourcePath is not readable: %v", ErrInvalidRequest, err)
+		}
+		return sourcePath, false, nil
+	}
+
+	sourceObjectKey := strings.TrimSpace(req.SourceObjectKey)
+	if sourceObjectKey == "" {
+		return "", false, fmt.Errorf("%w: sourcePath or sourceObjectKey is required", ErrInvalidRequest)
+	}
+
+	extension := filepath.Ext(sourceObjectKey)
+	sourceFile, err := s.CreateSourceUploadFile(extension)
+	if err != nil {
+		return "", false, fmt.Errorf("create source file for object download: %w", err)
+	}
+	sourcePath = sourceFile.Name()
+	if err := sourceFile.Close(); err != nil {
+		_ = os.Remove(sourcePath)
+		return "", false, fmt.Errorf("close source file for object download: %w", err)
+	}
+
+	s.reportProgress(req, ProcessProgress{
+		Phase:   "downloading_source",
+		Percent: 5,
+		Message: "Downloading source upload from storage",
+	})
+	if err := s.r2.DownloadFile(ctx, sourceObjectKey, sourcePath); err != nil {
+		_ = os.Remove(sourcePath)
+		return "", false, fmt.Errorf("download source object %s: %w", sourceObjectKey, err)
+	}
+
+	return sourcePath, true, nil
 }
 
 func (s *Service) thumbnailOffset(explicitSeconds int) int {

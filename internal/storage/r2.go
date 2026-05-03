@@ -370,3 +370,32 @@ func (c *R2Client) Download(ctx context.Context, objectKey string) ([]byte, stri
 
 	return payload, contentType, nil
 }
+
+func (c *R2Client) DownloadFile(ctx context.Context, objectKey, destinationPath string) error {
+	resp, err := c.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(strings.TrimLeft(objectKey, "/")),
+	})
+	if err != nil {
+		return fmt.Errorf("get object %s: %w", objectKey, err)
+	}
+	defer resp.Body.Close()
+
+	file, err := os.Create(destinationPath)
+	if err != nil {
+		return fmt.Errorf("create destination file %s: %w", destinationPath, err)
+	}
+
+	if _, err := io.Copy(file, resp.Body); err != nil {
+		file.Close()
+		_ = os.Remove(destinationPath)
+		return fmt.Errorf("write destination file %s: %w", destinationPath, err)
+	}
+
+	if err := file.Close(); err != nil {
+		_ = os.Remove(destinationPath)
+		return fmt.Errorf("close destination file %s: %w", destinationPath, err)
+	}
+
+	return nil
+}
